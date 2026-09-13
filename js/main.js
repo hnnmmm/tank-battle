@@ -6,7 +6,7 @@ import { MAPS } from './config.js';
 import { state } from './state.js';
 import { buildMap } from './map.js';
 import { update, togglePause, primaryAction } from './logic.js';
-import { draw } from './render.js';
+import { draw, WEBGL_OK } from './render.js';
 import { updateHUD, showOverlay, tickOverlay, syncMuteUI } from './hud.js';
 import { toggleMute } from './audio.js';
 import { initInput } from './input.js';
@@ -28,6 +28,11 @@ buildMap(MAPS[0]);
 state.player = null;
 setupUI();
 showOverlay('menu');
+if (!WEBGL_OK) {
+  document.querySelector('.ov-title').textContent = '无法启动 3D';
+  document.querySelector('.ov-sub').innerHTML = '当前浏览器 / 设备未启用 <b>WebGL</b>，无法渲染三维场景。<br>请更换支持 WebGL 的现代浏览器，或在系统设置中开启“硬件加速”后重试。';
+  document.getElementById('startBtn').style.display = 'none';
+}
 updateHUD();
 
 /* ---------- 主循环 ---------- */

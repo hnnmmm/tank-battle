@@ -82,11 +82,10 @@ body::after {
 
 .stage { display: flex; flex-direction: column; gap: 14px; align-items: center; }
 
-/* ===== 3D 透视棋盘 ===== */
+/* ===== 3D 场景画布（透视由 WebGL 相机提供） ===== */
 .canvas-wrap {
   position: relative;
   width: min(92vw, 520px); aspect-ratio: 1/1;
-  perspective: 1100px;
 }
 .canvas-wrap::before { /* 桌面光晕 */
   content: ""; position: absolute; inset: -30px; z-index: -1;
@@ -98,12 +97,7 @@ canvas#game {
   border-radius: 14px;
   border: 2px solid rgba(120, 150, 220, 0.25);
   box-shadow: 0 22px 55px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(0, 0, 0, 0.8), 0 0 26px rgba(74, 160, 255, 0.18);
-  transform: rotateX(16deg) scale(1.045);
-  transform-origin: 50% 46%;
-  transition: transform .4s ease;
 }
-/* 悬浮时略微放平，增强立体交互 */
-.stage:hover canvas#game { transform: rotateX(12deg) scale(1.045); }
 
 /* ===== 覆盖层（菜单 / 暂停 / 通关 / 结束） ===== */
 .overlay {

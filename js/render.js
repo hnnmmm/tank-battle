@@ -1,375 +1,586 @@
 'use strict';
 /* ============================================================
- * render.js · Canvas 2D 渲染（伪 3D：斜面高光、投影、辉光、渐变）
+ * render.js · Three.js 真 3D 渲染
+ * 所有设施（墙体/钢板/水域/树林/基地金鹰/坦克/子弹）均为 3D 模型
+ * 逻辑层仍使用 2D 网格坐标，此处负责映射到 3D 世界（XZ 平面）
  * ============================================================ */
+import * as THREE from './vendor/three.module.js';
 import { CELL, GRID, SIZE, DPR, REDUCED, T, DIRS, EAGLE, BASE, POWERUP_STYLE } from './config.js';
 import { state } from './state.js';
 
+const CO = (GRID - 1) / 2; // 网格中心偏移（13 格 → 6）
+
+/* ============================================================
+ * 坐标映射：2D 像素 / 网格 → 3D 世界
+ * ============================================================ */
+// 格子中心的 3D 坐标（c/r 为格子行列）
+function cellX(c) { return c - CO; }
+function cellZ(r) { return r - CO; }
+// 连续像素 → 世界（中心点已按像素中心处理）
+function pxX(x, half) { return (x + (half || 0)) / CELL - CO; }
+function pxZ(y, half) { return (y + (half || 0)) / CELL - CO; }
+// 坦克方向 → 绕 Y 轴旋转（模型默认朝 -Z 即“上方/远处”）
+function dirYaw(dir) { return -dir * Math.PI / 2; }
+
+/* ============================================================
+ * 渲染器 / 场景 / 相机 / 灯光
+ * ============================================================ */
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-canvas.width = SIZE * DPR;
-canvas.height = SIZE * DPR;
-
-/* ---------- 工具 ---------- */
-function px(ctx, x, y, w, h, color) {
-  ctx.fillStyle = color;
-  ctx.fillRect(x, y, w, h);
+let renderer = null;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(DPR);
+  renderer.setSize(SIZE, SIZE, false);
+  renderer.setClearColor(0x0b0d11, 1);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+} catch (err) {
+  renderer = null;
+  console.error('[坦克大战] WebGL 初始化失败，无法启动 3D 渲染：', err);
 }
-function cellRect(c, r) { return { x: c * CELL, y: r * CELL }; }
+// 供 main.js 判断是否需要显示回退提示
+export const WEBGL_OK = !!renderer;
 
-// 颜色明暗调节（hex -> 变亮/变暗）
-function shade(hex, f) {
-  const n = parseInt(hex.slice(1), 16);
-  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-  r = Math.max(0, Math.min(255, Math.round(r * f)));
-  g = Math.max(0, Math.min(255, Math.round(g * f)));
-  b = Math.max(0, Math.min(255, Math.round(b * f)));
-  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
-}
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d11);
+scene.fog = new THREE.Fog(0x0b0d11, 18, 34);
 
-// 圆角矩形路径
-function rounded(ctx, x, y, w, h, r) {
-  r = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+camera.position.set(0, 13.5, 13.5);
+camera.lookAt(0, -0.4, 0);
 
-// 投影（soft，向下向右偏移）
-function dropShadow(x, y, w, h, alpha) {
-  ctx.fillStyle = 'rgba(0,0,0,' + (alpha || 0.35) + ')';
-  rounded(ctx, x + 3, y + 5, w, h, 6);
-  ctx.fill();
-}
+// —— 灯光 ——
+scene.add(new THREE.HemisphereLight(0xbcd2ff, 0x1a1408, 0.55));
+const ambient = new THREE.AmbientLight(0x8890aa, 0.6);
+scene.add(ambient);
 
-// 斜面高光（上/左亮，下/右暗）
-function bevel(x, y, w, h, light, dark) {
-  if (light) { ctx.fillStyle = light; ctx.fillRect(x, y, w, 2); ctx.fillRect(x, y, 2, h); }
-  if (dark) { ctx.fillStyle = dark; ctx.fillRect(x, y + h - 2, w, 2); ctx.fillRect(x + w - 2, y, 2, h); }
-}
+const sun = new THREE.DirectionalLight(0xfff2d8, 1.6);
+sun.position.set(6, 15, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 50;
+sun.shadow.camera.left = -10;
+sun.shadow.camera.right = 10;
+sun.shadow.camera.top = 10;
+sun.shadow.camera.bottom = -10;
+sun.shadow.bias = -0.0004;
+scene.add(sun);
 
-/* ---------- 棋盘地面 + 网格 + 暗角 ---------- */
-function drawGround(t) {
-  px(ctx, 0, 0, SIZE, SIZE, '#0b0d11');
-  // 网格
-  ctx.strokeStyle = 'rgba(120,160,255,0.05)';
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= GRID; i++) {
-    ctx.beginPath();
-    ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, SIZE);
-    ctx.moveTo(0, i * CELL); ctx.lineTo(SIZE, i * CELL);
-    ctx.stroke();
-  }
-  // 暗角
-  const v = ctx.createRadialGradient(SIZE / 2, SIZE / 2, SIZE * 0.3, SIZE / 2, SIZE / 2, SIZE * 0.75);
-  v.addColorStop(0, 'rgba(0,0,0,0)');
-  v.addColorStop(1, 'rgba(0,0,0,0.5)');
-  ctx.fillStyle = v;
-  ctx.fillRect(0, 0, SIZE, SIZE);
-}
+const fill = new THREE.DirectionalLight(0x6fb6ff, 0.5);
+fill.position.set(-6, 6, -4);
+scene.add(fill);
 
-/* ---------- 砖墙（3D） ---------- */
-function drawBrick(ctx, x, y) {
-  dropShadow(x, y, CELL - 2, CELL - 2);
-  px(ctx, x, y, CELL, CELL, '#5a2c10'); // 灰缝底色
-  const fill = '#b86427', light = '#eaa15a', dark = '#6f360f';
-  // 2x2 砖块，带斜面
-  const bricks = [[2, 2, 17, 17], [21, 2, 17, 17], [2, 21, 17, 16], [21, 21, 17, 16]];
-  for (const [bx, by, bw, bh] of bricks) {
-    px(ctx, x + bx, y + by, bw, bh, fill);
-    bevel(x + bx, y + by, bw, bh, light, dark);
-    // 顶部小亮点
-    px(ctx, x + bx + 4, y + by + 3, 6, 4, 'rgba(255,220,170,0.35)');
-  }
+/* ============================================================
+ * 容器
+ * ============================================================ */
+const terrainGroup = new THREE.Group();   // 地面 + 地形 + 基地（地图变更时重建）
+const tankGroup = new THREE.Group();      // 坦克（缓存复用）
+const fxGroup = new THREE.Group();        // 子弹 / 爆炸 / 道具 / 飘分（每帧重建）
+scene.add(terrainGroup, tankGroup, fxGroup);
+
+/* ============================================================
+ * 共享资源（材质 / 几何体 / 纹理）
+ * ============================================================ */
+function canvasTexture(drawFn, w = 128, h = 128, repeat = null) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  drawFn(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  return t;
 }
 
-/* ---------- 钢板（金属 3D） ---------- */
-function drawSteel(ctx, x, y) {
-  dropShadow(x, y, CELL - 2, CELL - 2);
-  const g = ctx.createLinearGradient(x, y, x + CELL, y + CELL);
-  g.addColorStop(0, '#e8ecf2');
-  g.addColorStop(0.5, '#aab0ba');
-  g.addColorStop(1, '#676c76');
-  ctx.fillStyle = g;
-  ctx.fillRect(x, y, CELL, CELL);
-  bevel(x, y, CELL, CELL, 'rgba(255,255,255,0.6)', 'rgba(0,0,0,0.38)');
-  // 铆钉
-  const rivets = [[7, 7], [29, 7], [7, 29], [29, 29]];
-  for (const [rx, ry] of rivets) {
-    px(ctx, x + rx, y + ry, 5, 5, '#7a7e87');
-    px(ctx, x + rx + 1, y + ry + 1, 2, 2, 'rgba(255,255,255,0.7)');
-  }
-  // 中央横槽
-  px(ctx, x + 4, y + 18, CELL - 8, 3, 'rgba(0,0,0,0.25)');
-  px(ctx, x + 4, y + 18, CELL - 8, 1, 'rgba(255,255,255,0.35)');
-}
-
-/* ---------- 水域（动态水波） ---------- */
-function drawWater(ctx, x, y, frame) {
-  const g = ctx.createLinearGradient(x, y, x, y + CELL);
-  g.addColorStop(0, '#2E7ED4');
-  g.addColorStop(0.55, '#1B4E8A');
-  g.addColorStop(1, '#0f2f55');
-  ctx.fillStyle = g;
-  ctx.fillRect(x, y, CELL, CELL);
-  const off = frame ? 5 : 0;
-  for (let i = 0; i < 4; i++) {
-    const yy = y + 5 + i * 8;
-    px(ctx, x + ((off + i * 7) % 30), yy, 12, 3, 'rgba(255,255,255,0.28)');
-    px(ctx, x + ((off + i * 9 + 14) % 32), yy + 4, 9, 2, 'rgba(140,200,255,0.4)');
-  }
-}
-
-/* ---------- 树林（半透明遮挡，带投影与摇曳） ---------- */
-function drawTree(ctx, x, y, t) {
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(x + CELL / 2, y + CELL / 2 + 7, 17, 15, 0, 0, Math.PI * 2);
-  ctx.fill();
-  const greens = ['#1E5A2C', '#2E7D3F', '#3E9450', '#55A863'];
-  for (let i = 0; i < 10; i++) {
-    const sway = REDUCED ? 0 : Math.sin(t * 1.8 + i) * 1.3;
-    const gx = x + 4 + ((i * 19) % 32) + sway;
-    const gy = y + 4 + ((i * 13) % 32);
-    const r = 4 + (i % 3);
-    ctx.fillStyle = greens[i % 4];
-    ctx.beginPath();
-    ctx.arc(gx, gy, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.fillStyle = '#6fc77a';
-  for (let i = 0; i < 5; i++) {
-    ctx.fillRect(x + 3 + (i * 8) % 32, y + 4 + (i * 11) % 32, 5, 4);
-  }
-}
-
-/* ---------- 基地（金鹰） ---------- */
-function drawBase(ctx, t) {
-  const bx = BASE.c * CELL, by = BASE.r * CELL;
-  if (!state.base.alive) {
-    px(ctx, bx, by, CELL, CELL, '#3a1d10');
-    px(ctx, bx + 4, by + 24, 32, 4, '#A65A1E');
-    px(ctx, bx + 10, by + 28, 6, 6, '#C87932');
-    return;
-  }
-  dropShadow(bx, by, CELL - 2, CELL - 2, 0.3);
-  const s = 2; // 16x16 像素图放大 2 倍 = 32px，居中于格
-  const ox = bx + (CELL - 32) / 2, oy = by + (CELL - 32) / 2;
-  const map = { D: '#1a1a1a', G: '#E8B83A', W: '#FFF7E0', '.': null };
-  for (let r = 0; r < 16; r++) {
-    for (let c = 0; c < 16; c++) {
-      const col = map[EAGLE[r][c]];
-      if (col) px(ctx, ox + c * s, oy + r * s, s, s, col);
+// 砖墙纹理
+const brickTexture = canvasTexture((g, w, h) => {
+  g.fillStyle = '#5a2c10';
+  g.fillRect(0, 0, w, h);
+  const rows = 4, cols = 2;
+  const bh = h / rows, bwd = w / cols;
+  for (let r = 0; r < rows; r++) {
+    const off = (r % 2) ? 0 : bwd / 2;
+    for (let c = 0; c < cols; c++) {
+      const x = c * bwd + off;
+      if (x >= w) continue;
+      g.fillStyle = '#b86427';
+      g.fillRect(x + 1.5, r * bh + 1.5, bwd - 3, bh - 3);
+      g.fillStyle = 'rgba(255,205,130,0.28)';
+      g.fillRect(x + 2, r * bh + 2, bwd - 4, 3);
+      g.fillStyle = 'rgba(70,30,5,0.35)';
+      g.fillRect(x + 2, r * bh + bh - 4, bwd - 4, 2);
     }
   }
-  px(ctx, bx, by + CELL - 4, CELL, 4, '#1a1a1a');
-  // 加固时的蓝色高光
-  if (state.base.steelUntil > state.time) {
-    ctx.strokeStyle = '#7CC4FF';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(bx + 1, by + 1, CELL - 2, CELL - 2);
-  }
+}, 128, 128, [1, 1]);
+
+const matBrick = new THREE.MeshStandardMaterial({ map: brickTexture, roughness: 0.9, flatShading: true });
+const matSteel = new THREE.MeshStandardMaterial({ color: 0x9aa1ab, roughness: 0.35, metalness: 0.75, flatShading: true });
+const matSteelDark = new THREE.MeshStandardMaterial({ color: 0x5c626c, roughness: 0.4, metalness: 0.7 });
+const matWater = new THREE.MeshPhongMaterial({ color: 0x2E7ED4, transparent: true, opacity: 0.62, shininess: 80, specular: 0x9fd0ff });
+const matTrunk = new THREE.MeshStandardMaterial({ color: 0x654321, roughness: 0.9 });
+const matLeafDark = new THREE.MeshStandardMaterial({ color: 0x1E5A2C, roughness: 0.8, transparent: true, opacity: 0.55 });
+const matLeafLight = new THREE.MeshStandardMaterial({ color: 0x3E9450, roughness: 0.8, transparent: true, opacity: 0.55 });
+const matEagleDark = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.5 });
+const matEagleGold = new THREE.MeshStandardMaterial({ color: 0xE8B83A, roughness: 0.35, metalness: 0.55, emissive: 0x2a1c00, emissiveIntensity: 0.6 });
+const matEagleWhite = new THREE.MeshStandardMaterial({ color: 0xFFF7E0, roughness: 0.3, metalness: 0.35, emissive: 0x1a1200, emissiveIntensity: 0.3 });
+const matBaseRubble = new THREE.MeshStandardMaterial({ color: 0x3a1d10, roughness: 0.9, flatShading: true });
+
+const geoBoxUnit = new THREE.BoxGeometry(1, 1, 1);
+
+/* ---------- 坦克模型（低多边形 + 渐变/金属分件） ---------- */
+const tankGeoCaches = {};
+function tankGeo(w, h, d) { const k = w + '|' + h + '|' + d; return tankGeoCaches[k] || (tankGeoCaches[k] = new THREE.BoxGeometry(w, h, d)); }
+function tankMatCache(color, metal, rough, emissive, ei) {
+  const k = color + '|' + metal + '|' + rough + '|' + emissive;
+  return new THREE.MeshStandardMaterial({ color, metalness: metal, roughness: rough, emissive: emissive !== undefined ? emissive : 0x000000, emissiveIntensity: ei || 1, flatShading: true });
 }
 
-/* ---------- 坦克（3D 立体） ---------- */
-function drawTankBody(ctx, x, y, w, h, kind) {
-  const s = w / 12;                       // 12x12 像素网格
-  const bodyTop = shade(kind.color, 1.28);
-  const bodyBot = shade(kind.color, 0.78);
-  // 履带（左右两列，带分段高光）
-  px(ctx, x, y + 1 * s, 2 * s, 10 * s, kind.dark);
-  px(ctx, x + 10 * s, y + 1 * s, 2 * s, 10 * s, kind.dark);
-  for (let i = 0; i < 4; i++) {
-    const ty = y + (1.5 + i * 2.4) * s;
-    px(ctx, x, ty, 2 * s, s, kind.color);
-    px(ctx, x + 10 * s, ty, 2 * s, s, kind.color);
-  }
-  // 车身（上亮下暗的纵向渐变）
-  const bg = ctx.createLinearGradient(0, y + 2 * s, 0, y + 10 * s);
-  bg.addColorStop(0, bodyTop);
-  bg.addColorStop(1, bodyBot);
-  ctx.fillStyle = bg;
-  ctx.fillRect(x + 2 * s, y + 2 * s, 8 * s, 8 * s);
-  px(ctx, x + 2 * s, y + 2 * s, 8 * s, 2 * s, 'rgba(255,255,255,0.32)');
-  px(ctx, x + 2 * s, y + 8 * s, 8 * s, 2 * s, 'rgba(0,0,0,0.25)');
-  // 炮塔（渐变 + 高光 + 中缝）
-  const tg = ctx.createLinearGradient(0, y + 4 * s, 0, y + 8 * s);
-  tg.addColorStop(0, shade(kind.barrel, 1.25));
-  tg.addColorStop(1, kind.barrel);
-  ctx.fillStyle = tg;
-  ctx.fillRect(x + 4 * s, y + 4 * s, 4 * s, 4 * s);
-  px(ctx, x + 4 * s, y + 4 * s, 4 * s, 1.5 * s, 'rgba(255,255,255,0.28)');
-  px(ctx, x + 5 * s, y + 4 * s, 2 * s, 4 * s, kind.dark);
-}
-function drawTank(ctx, tank) {
-  const kind = tank.kind;
-  const w = tank.w, h = tank.h;
-  // 地面投影（未旋转，向下偏移）
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.beginPath();
-  ctx.ellipse(tank.x + w / 2, tank.y + h / 2 + 3, w * 0.5, h * 0.5, 0, 0, Math.PI * 2);
-  ctx.fill();
+function buildTank(kind) {
+  const root = new THREE.Group();
+  const bright = new THREE.Color(kind.color).offsetHSL(0, 0, 0.10).getHex();
+  const bodyMat = tankMatCache(kind.color, 0.35, 0.45, kind.isPlayer ? 0x1a1300 : 0x000000, kind.isPlayer ? 0.5 : 0);
+  const bodyTopMat = tankMatCache(bright, 0.3, 0.4, 0x000000, 0);
+  const trackMat = tankMatCache(kind.dark, 0.55, 0.7, 0x000000, 0);
+  const barrelMat = tankMatCache(kind.barrel, 0.55, 0.5, 0x000000, 0);
 
-  ctx.save();
-  ctx.translate(tank.x + w / 2, tank.y + h / 2);
-  ctx.rotate(tank.dir * Math.PI / 2);
-  ctx.translate(-w / 2, -h / 2);
-  drawTankBody(ctx, 0, 0, w, h, kind);
-  // 炮管（朝上，带高光）
-  px(ctx, w / 2 - 1.5, 0, 3, 6, kind.barrel);
-  px(ctx, w / 2 - 1.5, 0, 1, 6, 'rgba(255,255,255,0.3)');
-  ctx.restore();
+  // 履带（左右，带分段高光）
+  const trackGeo = tankGeo(0.16, 0.70, 0.18);
+  for (const side of [-1, 1]) {
+    const track = new THREE.Mesh(trackGeo, trackMat);
+    track.position.set(side * 0.26, 0.12, 0);
+    track.castShadow = true; track.receiveShadow = true;
+    root.add(track);
+    // 履带分段
+    for (let i = 0; i < 3; i++) {
+      const seg = new THREE.Mesh(tankGeo(0.18, 0.10, 0.20), tankMatCache(kind.color, 0.45, 0.6, 0x000000, 0));
+      seg.position.set(side * 0.26, 0.12, -0.22 + i * 0.22);
+      seg.castShadow = true;
+      root.add(seg);
+    }
+  }
+  // 车体
+  const body = new THREE.Mesh(tankGeo(0.50, 0.24, 0.68), bodyMat);
+  body.position.set(0, 0.30, 0);
+  body.castShadow = true; body.receiveShadow = true;
+  root.add(body);
+  const bodyTop = new THREE.Mesh(tankGeo(0.42, 0.08, 0.56), bodyTopMat);
+  bodyTop.position.set(0, 0.46, 0);
+  bodyTop.castShadow = true;
+  root.add(bodyTop);
+  // 炮塔
+  const turret = new THREE.Mesh(tankGeo(0.28, 0.13, 0.34), barrelMat);
+  turret.position.set(0, 0.56, 0.02);
+  turret.castShadow = true;
+  root.add(turret);
+  const turretCap = new THREE.Mesh(tankGeo(0.20, 0.05, 0.20), tankMatCache(kind.barrel, 0.4, 0.4, 0x000000, 0));
+  turretCap.position.set(0, 0.64, 0.02);
+  turretCap.castShadow = true;
+  root.add(turretCap);
+  // 炮管
+  const barrel = new THREE.Mesh(tankGeo(0.06, 0.06, 0.42), barrelMat);
+  barrel.position.set(0, 0.58, -0.36);
+  barrel.castShadow = true;
+  root.add(barrel);
+  // 装甲坦克加装侧裙
+  if (kind.id === 'armor') {
+    const skirt = new THREE.Mesh(tankGeo(0.54, 0.10, 0.68), tankMatCache(kind.color, 0.4, 0.5, 0x000000, 0));
+    skirt.position.set(0, 0.20, 0);
+    skirt.castShadow = true;
+    root.add(skirt);
+  }
 
-  // 防护罩（辉光虚线）
-  if (tank.shield > 0) {
-    ctx.save();
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = '#8FD3FF';
-    ctx.shadowColor = '#8FD3FF';
-    ctx.shadowBlur = 10;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(tank.x - 1, tank.y - 1, w + 2, h + 2);
-    ctx.restore();
-  }
-  // 出生闪烁
-  if (tank.spawnShield > 0 && Math.floor(tank.spawnShield * 8) % 2 === 0) {
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillRect(tank.x, tank.y, w, h);
-  }
-  // 玩家开火闪光
-  if (tank.isPlayer && tank.flashT > 0) {
-    const fx = tank.x + w / 2 + DIRS[tank.dir].dx * w / 2;
-    const fy = tank.y + h / 2 + DIRS[tank.dir].dy * h / 2;
-    ctx.save();
-    ctx.shadowColor = '#FFE9A8';
-    ctx.shadowBlur = 12;
-    ctx.fillStyle = '#FFE9A8';
-    ctx.beginPath();
-    ctx.arc(fx, fy, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
+  // 阴影投影板（渲染坦克时切换）
+  const shadowDisc = new THREE.Mesh(new THREE.CircleGeometry(0.55, 24), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false }));
+  shadowDisc.rotation.x = -Math.PI / 2;
+  shadowDisc.position.y = 0.02;
+  root.add(shadowDisc);
+
+  root.userData.kind = kind;
+  root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  return root;
 }
 
-/* ---------- 子弹（辉光弹丸） ---------- */
-function drawBullets(ctx) {
-  for (const b of state.bullets) {
-    const col = b.owner === 'p' ? '#FFE9A8' : '#FFB3A0';
-    ctx.save();
-    ctx.shadowColor = col;
-    ctx.shadowBlur = 9;
-    const g = ctx.createRadialGradient(b.x, b.y, 1, b.x, b.y, 7);
-    g.addColorStop(0, '#ffffff');
-    g.addColorStop(0.5, col);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+/* ---------- 砖墙 / 钢板 / 水域 / 树林 / 基地 ---------- */
+function makeWall(type) {
+  const g = new THREE.Group();
+  if (type === T.BRICK) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.72, 0.92), matBrick);
+    m.position.y = 0.36;
+    m.castShadow = true; m.receiveShadow = true;
+    g.add(m);
+  } else if (type === T.STEEL) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.90, 0.80, 0.90), matSteel);
+    m.position.y = 0.40;
+    m.castShadow = true; m.receiveShadow = true;
+    g.add(m);
+    const rivetGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.05, 10);
+    for (const [dx, dz] of [[-0.28, -0.28], [0.28, -0.28], [-0.28, 0.28], [0.28, 0.28]]) {
+      const rv = new THREE.Mesh(rivetGeo, matSteelDark);
+      rv.position.set(dx, 0.82, dz);
+      rv.castShadow = true;
+      g.add(rv);
+    }
+  } else if (type === T.WATER) {
+    const base = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.10, 0.96), matWater);
+    base.position.y = 0.05;
+    base.receiveShadow = true;
+    g.add(base);
+    g.userData.water = true;
   }
+  return g;
 }
 
-/* ---------- 爆炸特效（火球光晕） ---------- */
-function drawEffects(ctx) {
-  for (const e of state.effects) {
-    const p = e.t / e.dur;
-    const size = e.size * (0.3 + 0.9 * p);
-    ctx.save();
-    ctx.globalAlpha = 1 - p;
-    const g = ctx.createRadialGradient(e.x, e.y, 1, e.x, e.y, size / 2);
-    g.addColorStop(0, '#fff');
-    g.addColorStop(0.3, '#ffd966');
-    g.addColorStop(0.7, '#ff7a2f');
-    g.addColorStop(1, 'rgba(255,60,20,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(e.x, e.y, size / 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
+function makeTree() {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.10, 0.5, 8), matTrunk);
+  trunk.position.y = 0.25;
+  trunk.castShadow = true;
+  g.add(trunk);
+  const crown1 = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), matLeafDark);
+  crown1.position.y = 0.78;
+  crown1.castShadow = true;
+  g.add(crown1);
+  const crown2 = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), matLeafLight);
+  crown2.position.set(0.10, 0.62, 0.05);
+  g.add(crown2);
+  const crown3 = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), matLeafDark);
+  crown3.position.set(-0.10, 0.66, -0.08);
+  g.add(crown3);
+  g.userData.tree = true;
+  return g;
 }
 
-/* ---------- 道具（玻璃质感 + 辉光 + 脉动） ---------- */
-function drawPowerups(ctx) {
-  for (const pu of state.powerups) {
-    const st = POWERUP_STYLE[pu.type];
-    if (Math.floor(pu.t * 4) % 2 === 0) continue;
-    const pulse = 1 + 0.06 * Math.sin(pu.t * 6);
-    const cw = CELL * pulse;
-    const ox = pu.x + (CELL - cw) / 2;
-    const oy = pu.y + (CELL - cw) / 2;
-    ctx.save();
-    ctx.shadowColor = st.color;
-    ctx.shadowBlur = 14;
-    ctx.fillStyle = '#0e1014';
-    rounded(ctx, ox, oy, cw, cw, 5);
-    ctx.fill();
-    ctx.strokeStyle = st.color;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.restore();
-    ctx.fillStyle = st.color;
-    ctx.font = 'bold ' + Math.round(15 * pulse) + 'px "Courier New",monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(st.label, pu.x + CELL / 2, pu.y + CELL / 2 + 1);
+function makeBase() {
+  const g = new THREE.Group();
+  // 基座
+  const plinth = new THREE.Mesh(new THREE.BoxGeometry(0.90, 0.16, 0.90), matSteelDark);
+  plinth.position.y = 0.08;
+  plinth.castShadow = true; plinth.receiveShadow = true;
+  g.add(plinth);
+
+  // 金鹰浮雕：把 16x16 像素图映射为凸起小方块
+  const eagleGroup = new THREE.Group();
+  const pxSize = 0.94 / 16;
+  const geoPixel = new THREE.BoxGeometry(pxSize * 0.96, pxSize * 0.96, pxSize * 0.5);
+  const palettes = { D: matEagleDark, G: matEagleGold, W: matEagleWhite };
+  for (let r = 0; r < 16; r++) {
+    for (let c = 0; c < 16; c++) {
+      const ch = EAGLE[r][c];
+      const mat = palettes[ch];
+      if (!mat) continue;
+      const m = new THREE.Mesh(geoPixel, mat);
+      // 像素 c 列 → X，r 行 → Y（自上而下），鹰面朝 +Z（玩家方向）
+      m.position.set((c - 7.5) * pxSize, 0.16 + (15.5 - r) * pxSize, pxSize * 0.28);
+      m.castShadow = true;
+      eagleGroup.add(m);
+    }
   }
+  eagleGroup.name = 'eagle';
+  g.add(eagleGroup);
+
+  // 残骸（基地被毁后显示）
+  const rubble = new THREE.Group();
+  const rub = new THREE.Mesh(new THREE.BoxGeometry(0.80, 0.18, 0.80), matBaseRubble);
+  rub.position.y = 0.09;
+  rub.castShadow = true;
+  rubble.add(rub);
+  rubble.name = 'rubble';
+  rubble.visible = false;
+  g.add(rubble);
+
+  return g;
 }
 
-/* ---------- 飘分文字（辉光） ---------- */
-function drawFloats(ctx) {
-  for (const f of state.floats) {
-    ctx.save();
-    ctx.globalAlpha = Math.min(1, f.t * 2);
-    ctx.shadowColor = '#FFE9A8';
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = '#FFE9A8';
-    ctx.font = 'bold 13px "Courier New",monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(f.text, f.x, f.y);
-    ctx.restore();
-  }
-}
+/* ============================================================
+ * 地形 & 基地（随地图变更重建）
+ * ============================================================ */
+let lastTiles = null;
+let baseGroup = null;
+const waterMeshes = [];
+const treeMeshes = [];
 
-/* ---------- 主渲染 ---------- */
-export function draw() {
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  const frame = REDUCED ? 0 : Math.floor(state.time * 3) % 2;
-  drawGround(frame);
-  ctx.save();
-  if (state.shake > 0.3) {
-    ctx.translate(
-      Math.round((Math.random() - 0.5) * state.shake * 2),
-      Math.round((Math.random() - 0.5) * state.shake * 2)
-    );
+function rebuildTerrain() {
+  // 清空
+  while (terrainGroup.children.length) {
+    const c = terrainGroup.children[0];
+    terrainGroup.remove(c);
+    disposeObject(c);
   }
-  // 地形（树林最后画，盖住坦克）
+  waterMeshes.length = 0;
+  treeMeshes.length = 0;
+
+  // 地面
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(GRID, GRID), new THREE.MeshStandardMaterial({ color: 0x15181f, roughness: 0.95 }));
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  terrainGroup.add(ground);
+
+  // 棋盘格纹（更立体）
+  const gridLine = new THREE.GridHelper(GRID, GRID, 0x2c3a5a, 0x1b2436);
+  gridLine.position.y = 0.01;
+  terrainGroup.add(gridLine);
+
+  // 地形
   for (let r = 0; r < GRID; r++) {
     for (let c = 0; c < GRID; c++) {
       const t = state.tiles[r][c];
       if (t === T.EMPTY || t === T.TREE) continue;
-      const x = c * CELL, y = r * CELL;
-      if (t === T.BRICK) drawBrick(ctx, x, y);
-      else if (t === T.STEEL) drawSteel(ctx, x, y);
-      else if (t === T.WATER) drawWater(ctx, x, y, frame);
+      const obj = makeWall(t);
+      obj.position.set(cellX(c), 0, cellZ(r));
+      if (t === T.WATER) waterMeshes.push({ obj, i: waterMeshes.length });
+      terrainGroup.add(obj);
     }
   }
-  drawBase(ctx, frame);
-  drawPowerups(ctx);
-  for (const e of state.enemies) if (e.alive) drawTank(ctx, e);
-  if (state.player && state.player.alive) drawTank(ctx, state.player);
-  drawBullets(ctx);
+
+  // 树林（最后建）
   for (let r = 0; r < GRID; r++) {
     for (let c = 0; c < GRID; c++) {
-      if (state.tiles[r][c] === T.TREE) drawTree(ctx, c * CELL, r * CELL, state.time);
+      if (state.tiles[r][c] !== T.TREE) continue;
+      const tree = makeTree();
+      tree.position.set(cellX(c) + (Math.random() - 0.5) * 0.2, 0, cellZ(r) + (Math.random() - 0.5) * 0.2);
+      tree.userData.baseX = tree.position.x;
+      tree.userData.baseZ = tree.position.z;
+      treeMeshes.push(tree);
+      terrainGroup.add(tree);
     }
   }
-  drawEffects(ctx);
-  drawFloats(ctx);
-  ctx.restore();
+
+  // 基地
+  baseGroup = makeBase();
+  baseGroup.position.set(cellX(BASE.c), 0, cellZ(BASE.r));
+  terrainGroup.add(baseGroup);
+}
+
+function disposeObject(obj) {
+  obj.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
+      else o.material.dispose();
+    }
+  });
+}
+
+/* ============================================================
+ * 坦克缓存
+ * ============================================================ */
+const tankMeshes = new Map(); // tank对象 -> Group
+
+function syncTanks() {
+  const want = [];
+  if (state.player) want.push(state.player);
+  for (const e of state.enemies) want.push(e);
+
+  const wantSet = new Set(want);
+  for (const [tank, mesh] of tankMeshes) {
+    if (!wantSet.has(tank)) { tankGroup.remove(mesh); disposeObject(mesh); tankMeshes.delete(tank); }
+  }
+
+  for (const tank of want) {
+    let mesh = tankMeshes.get(tank);
+    if (!mesh) {
+      mesh = buildTank(tank.kind);
+      tankMeshes.set(tank, mesh);
+      tankGroup.add(mesh);
+    }
+    const alive = tank.alive;
+    mesh.visible = alive;
+    if (!alive) continue;
+    const wx = pxX(tank.x, tank.w / 2);
+    const wz = pxZ(tank.y, tank.h / 2);
+    mesh.position.set(wx, 0, wz);
+    mesh.rotation.y = dirYaw(tank.dir);
+
+    // 防护罩
+    syncShield(mesh, tank);
+    // 出生闪烁
+    let flash = mesh.userData.spawnFlash;
+    if (tank.spawnShield > 0 && Math.floor(tank.spawnShield * 8) % 2 === 0) {
+      if (!flash) {
+        flash = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4, depthWrite: false }));
+        flash.position.y = 0.4;
+        mesh.add(flash);
+        mesh.userData.spawnFlash = flash;
+      }
+      flash.visible = true;
+    } else if (flash) flash.visible = false;
+  }
+}
+
+function syncShield(mesh, tank) {
+  let shield = mesh.userData.shield;
+  if (tank.shield > 0) {
+    if (!shield) {
+      shield = new THREE.Mesh(new THREE.SphereGeometry(0.6, 16, 12),
+        new THREE.MeshBasicMaterial({ color: 0x8FD3FF, transparent: true, opacity: 0.22, depthWrite: false }));
+      shield.position.y = 0.4;
+      mesh.add(shield);
+      mesh.userData.shield = shield;
+    }
+    shield.visible = true;
+    shield.rotation.y += 0.02;
+  } else if (shield) shield.visible = false;
+}
+
+/* ============================================================
+ * 子弹 / 爆炸 / 道具 / 飘分（每帧重建）
+ * ============================================================ */
+let bulletGeo = null, bulletMatP = null, bulletMatE = null;
+let particleGeo = null, particleMats = [];
+
+function clearGroup(g) {
+  while (g.children.length) {
+    const c = g.children[0];
+    g.remove(c);
+    if (c.material) c.material.dispose();
+  }
+}
+
+function syncFx() {
+  clearGroup(fxGroup);
+
+  // —— 子弹（发光弹丸 + 尾迹） ——
+  if (!bulletGeo) bulletGeo = new THREE.SphereGeometry(0.09, 12, 8);
+  if (!bulletMatP) bulletMatP = new THREE.MeshBasicMaterial({ color: 0xFFE9A8 });
+  if (!bulletMatE) bulletMatE = new THREE.MeshBasicMaterial({ color: 0xFFB3A0 });
+  for (const b of state.bullets) {
+    if (b.dead) continue;
+    const mat = b.owner === 'p' ? bulletMatP : bulletMatE;
+    const m = new THREE.Mesh(bulletGeo, mat);
+    const wx = pxX(b.x - 4, 4); // b.x 为中心
+    const wz = pxZ(b.y - 4, 4);
+    m.position.set(wx, 0.35, wz);
+    fxGroup.add(m);
+    // 尾迹
+    const tail = new THREE.Mesh(bulletGeo, mat);
+    tail.scale.set(1, 1, 2.2);
+    const d = DIRS[b.dir];
+    tail.position.set(wx - d.dx * 0.16, 0.35, wz + d.dy * 0.16);
+    tail.rotation.y = dirYaw(b.dir);
+    fxGroup.add(tail);
+  }
+
+  // —— 爆炸火球 ——
+  if (!particleGeo) particleGeo = new THREE.SphereGeometry(0.14, 10, 8);
+  for (const e of state.effects) {
+    const p = Math.min(1, e.t / e.dur);
+    const s = (e.size / CELL) * (0.4 + 0.9 * p);
+    const mat = new THREE.MeshBasicMaterial({
+      color: p < 0.4 ? 0xffffff : (p < 0.7 ? 0xffd966 : 0xff7a2f),
+      transparent: true, opacity: 0.9 * (1 - p), depthWrite: false
+    });
+    const m = new THREE.Mesh(new THREE.SphereGeometry(s, 12, 10), mat);
+    const wx = pxX(e.x - e.size, e.size); // e.x 为中心
+    const wz = pxZ(e.y - e.size, e.size);
+    m.position.set(wx, s * 0.5, wz);
+    fxGroup.add(m);
+    mat.userData = { dispose: true };
+  }
+
+  // —— 道具（发光旋转体 + 标签） ——
+  for (const pu of state.powerups) {
+    if (pu.dead) continue;
+    const st = POWERUP_STYLE[pu.type];
+    const wx = pxX(pu.x, CELL / 2), wz = pxZ(pu.y, CELL / 2);
+    const y = 0.35 + Math.sin(state.time * 3 + pu.type.length) * 0.06;
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(st.color),
+      emissive: new THREE.Color(st.color), emissiveIntensity: 0.9,
+      roughness: 0.3, metalness: 0.4
+    });
+    const body = new THREE.Mesh(new THREE.OctahedronGeometry(0.26, 0), mat);
+    body.position.set(wx, y, wz);
+    body.rotation.y = state.time * 2.2;
+    body.scale.setScalar(1 + 0.06 * Math.sin(state.time * 6));
+    body.castShadow = true;
+    fxGroup.add(body);
+
+    // 光环
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.03, 8, 20),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(st.color), transparent: true, opacity: 0.5, depthWrite: false }));
+    ring.rotation.x = Math.PI / 2;
+    ring.position.set(wx, 0.05, wz);
+    fxGroup.add(ring);
+
+    // 标签（Sprite 文字）
+    const label = textSprite(st.label, st.color);
+    label.position.set(wx, y + 0.55, wz);
+    fxGroup.add(label);
+  }
+
+  // —— 飘分文字 ——
+  for (const f of state.floats) {
+    const wx = pxX(f.x - 20, 20), wz = pxZ(f.y - 20, 20);
+    const y = 0.5 + (1 - f.t) * 0.4;
+    const label = textSprite(f.text, '#FFE9A8');
+    label.position.set(wx, y, wz);
+    label.material.opacity = Math.min(1, f.t * 2);
+    fxGroup.add(label);
+  }
+}
+
+const spriteCache = {};
+function textSprite(text, color) {
+  const key = text + color;
+  const base = spriteCache[key];
+  if (!base) {
+    const c = document.createElement('canvas');
+    c.width = 128; c.height = 64;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, c.width, c.height);
+    g.font = 'bold 30px "Courier New", monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.lineWidth = 6;
+    g.strokeStyle = 'rgba(0,0,0,0.75)';
+    g.strokeText(text, 64, 34);
+    g.fillStyle = color;
+    g.fillText(text, 64, 34);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    spriteCache[key] = new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false });
+  }
+  const sp = new THREE.Sprite(spriteCache[key]);
+  sp.scale.set(0.72, 0.36, 1);
+  return sp;
+}
+
+/* ============================================================
+ * 主渲染入口（main 每帧调用）
+ * ============================================================ */
+export function draw() {
+  if (!renderer) return; // WebGL 不可用时跳过渲染，其余逻辑由 main 循环照常驱动
+  const t = state.time;
+
+  // 地图变化则重建
+  if (state.tiles !== lastTiles) {
+    rebuildTerrain();
+    lastTiles = state.tiles;
+  }
+
+  // 基地存活状态切换
+  if (baseGroup) {
+    const dead = !state.base.alive;
+    baseGroup.getObjectByName('eagle').visible = !dead;
+    baseGroup.getObjectByName('rubble').visible = dead;
+  }
+
+  // 水域动画
+  if (!REDUCED) {
+    for (const w of waterMeshes) {
+      w.obj.position.y = Math.sin(t * 3 + w.i) * 0.03;
+    }
+    // 树微摇
+    for (const tr of treeMeshes) {
+      tr.rotation.z = Math.sin(t * 1.6 + tr.position.x) * 0.02;
+      tr.rotation.x = Math.cos(t * 1.3 + tr.position.z) * 0.02;
+    }
+  }
+
+  syncTanks();
+  syncFx();
+
+  renderer.render(scene, camera);
 }
