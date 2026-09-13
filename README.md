@@ -45,11 +45,25 @@ python3 -m http.server 8000
 
 ## 技术实现
 
-- 原生 ES Modules 分层架构：`config` / `state` / `map` / `audio` / `input` / `logic` / `render` / `hud` / `main`
-- 纯原生 JavaScript + Canvas 2D，零第三方库
-- 伪 3D 立体渲染：斜面高光、投影、渐变金属 / 水体、辉光粒子与透视棋盘
-- 霓虹 / 玻璃拟态 UI，动态星点背景
-- 像素风程序化绘制：砖墙、钢板、水域（动态水波）、树林（半透明遮挡）、金鹰基地
+- 纯原生 JavaScript（ES Modules）+ Canvas 2D，零第三方库，无需构建
+- 分层模块架构，职责清晰、单向依赖：
+
+```
+js/
+├── config.js   常量与静态数据（关卡地图、坦克种类、道具、金鹰像素图）
+├── state.js    全局可变状态（单一数据源）
+├── map.js      地图构建、地形查询、碰撞、基地加固
+├── audio.js    Web Audio 程序合成音效
+├── input.js    键盘 / 触屏映射
+├── logic.js    游戏逻辑（移动/碰撞/开火/AI/道具/关卡流程）
+├── render.js   Canvas 2D 渲染（伪 3D 光效）
+├── hud.js      HUD 数值与覆盖层（菜单/暂停/通关/结束）
+└── main.js     入口：装配各模块、绑定 UI、主循环
+```
+
+- 伪 3D 立体渲染：斜面高光（bevel）、投影（dropShadow）、渐变金属/水体、辉光粒子、径向暗角
+- 霓虹 / 玻璃拟态 UI：动态星点背景、玻璃质感 HUD 卡片、3D 透视棋盘（`rotateX`）、霓虹光晕按钮
+- 像素风程序化绘制：砖墙、钢板、水域（动态水波）、树林（半透明遮挡并摇曳）、金鹰基地
 - Web Audio API 程序合成音效（需首次交互后生效，符合浏览器自动播放策略）
 - 响应式布局：桌面端侧栏 HUD，移动端纵向堆叠 + 触屏按键
 - 遵守 `prefers-reduced-motion`，减少动态效果
