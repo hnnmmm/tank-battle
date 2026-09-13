@@ -38,23 +38,65 @@ export function initInput(handlers) {
     if (k) keys[k] = false;
   });
 
-  // 触屏虚拟按键
+  // 触屏：虚拟摇杆 + 开火按钮
   const touchPad = document.getElementById('touchPad');
+  const joystick = document.getElementById('joystick');
+  const stick = document.getElementById('stick');
+  const fireBtn = document.getElementById('fireBtn');
   if (touchPad && window.matchMedia && matchMedia('(pointer: coarse)').matches) {
     touchPad.classList.add('visible');
   }
-  if (touchPad) {
-    const TOUCHMAP = { up: 'up', down: 'down', left: 'left', right: 'right', fire: 'fire' };
-    for (const btn of touchPad.querySelectorAll('button')) {
-      const k = TOUCHMAP[btn.getAttribute('data-k')];
-      if (!k) continue;
-      const on = ev => { ev.preventDefault(); keys[k] = true; btn.classList.add('pressed'); initAudio(); };
-      const off = ev => { ev.preventDefault(); keys[k] = false; btn.classList.remove('pressed'); };
-      btn.addEventListener('pointerdown', on);
-      btn.addEventListener('pointerup', off);
-      btn.addEventListener('pointercancel', off);
-      btn.addEventListener('pointerleave', off);
-      btn.addEventListener('contextmenu', ev => ev.preventDefault());
-    }
+
+  if (fireBtn) {
+    const on = ev => { ev.preventDefault(); keys.fire = true; fireBtn.classList.add('pressed'); initAudio(); fireBtn.setPointerCapture(ev.pointerId); };
+    const off = ev => { ev.preventDefault(); keys.fire = false; fireBtn.classList.remove('pressed'); };
+    fireBtn.addEventListener('pointerdown', on);
+    fireBtn.addEventListener('pointerup', off);
+    fireBtn.addEventListener('pointercancel', off);
+    fireBtn.addEventListener('contextmenu', ev => ev.preventDefault());
+  }
+
+  if (joystick && stick) {
+    const RADIUS = 36;   // 摇杆头最大偏移半径（px）
+    const TH = 10;       // 方向触发死区（px）
+    let jid = null, jcx = 0, jcy = 0;
+
+    const setDirs = (dx, dy) => {
+      keys.up = dy < -TH;
+      keys.down = dy > TH;
+      keys.left = dx < -TH;
+      keys.right = dx > TH;
+    };
+    const place = (dx, dy) => {
+      const len = Math.hypot(dx, dy);
+      const cl = len > RADIUS ? RADIUS / len : 1;
+      stick.style.transform = `translate(${dx * cl}px, ${dy * cl}px)`;
+    };
+
+    joystick.addEventListener('pointerdown', e => {
+      e.preventDefault(); initAudio();
+      jid = e.pointerId;
+      joystick.setPointerCapture(e.pointerId);
+      const r = joystick.getBoundingClientRect();
+      jcx = r.left + r.width / 2;
+      jcy = r.top + r.height / 2;
+      const dx = e.clientX - jcx, dy = e.clientY - jcy;
+      place(dx, dy); setDirs(dx, dy);
+      joystick.classList.add('active');
+    });
+    joystick.addEventListener('pointermove', e => {
+      if (jid === null || e.pointerId !== jid) return;
+      const dx = e.clientX - jcx, dy = e.clientY - jcy;
+      place(dx, dy); setDirs(dx, dy);
+    });
+    const endJoystick = e => {
+      if (jid === null || e.pointerId !== jid) return;
+      jid = null;
+      keys.up = keys.down = keys.left = keys.right = false;
+      stick.style.transform = 'translate(0, 0)';
+      joystick.classList.remove('active');
+    };
+    joystick.addEventListener('pointerup', endJoystick);
+    joystick.addEventListener('pointercancel', endJoystick);
   }
 }

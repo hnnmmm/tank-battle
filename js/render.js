@@ -294,7 +294,7 @@ function makeBase() {
 /* ============================================================
  * 地形 & 基地（随地图变更重建）
  * ============================================================ */
-let lastTiles = null;
+let lastTilesVersion = -1;
 let baseGroup = null;
 const waterMeshes = [];
 const treeMeshes = [];
@@ -554,10 +554,10 @@ export function draw() {
   if (!renderer) return; // WebGL 不可用时跳过渲染，其余逻辑由 main 循环照常驱动
   const t = state.time;
 
-  // 地图变化则重建
-  if (state.tiles !== lastTiles) {
+  // 地形内容变化则重建（版本号由 map.js 在改动时递增）
+  if (state.tilesVersion !== lastTilesVersion) {
     rebuildTerrain();
-    lastTiles = state.tiles;
+    lastTilesVersion = state.tilesVersion;
   }
 
   // 基地存活状态切换

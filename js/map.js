@@ -17,6 +17,7 @@ export function buildMap(mapArr) {
     tiles.push(row);
   }
   state.tiles = tiles;
+  state.tilesVersion++;
   state.base.alive = true;
   state.base.steelUntil = 0;
   state.base.steelCells = [];
@@ -28,7 +29,10 @@ export function tileAt(c, r) {
 }
 
 export function removeTile(c, r) {
-  if (c >= 0 && r >= 0 && c < GRID && r < GRID) state.tiles[r][c] = T.EMPTY;
+  if (c >= 0 && r >= 0 && c < GRID && r < GRID && state.tiles[r][c] !== T.EMPTY) {
+    state.tiles[r][c] = T.EMPTY;
+    state.tilesVersion++;
+  }
 }
 
 /* ---------- 地形碰撞（坦克是否可通过） ---------- */
@@ -56,6 +60,7 @@ export function fortifyBase() {
       }
     }
   }
+  if (s.steelCells.length > 0) state.tilesVersion++;
 }
 
 export function unfortifyBase() {
@@ -65,5 +70,6 @@ export function unfortifyBase() {
   for (const [c, r] of s.steelCells) {
     if (state.tiles[r][c] === T.STEEL) state.tiles[r][c] = T.BRICK;
   }
+  state.tilesVersion++;
   s.steelCells = [];
 }

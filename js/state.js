@@ -11,6 +11,7 @@ export const state = {
   hi: (function () { try { return parseInt(localStorage.getItem('tb-hi') || '0', 10) || 0; } catch (e) { return 0; } })(),
   lives: 3,
   tiles: null,                // 二维数组 [r][c]
+  tilesVersion: 0,            // 地形版本号：内容变化时递增，供渲染层重建 3D 地形
   player: null,
   enemies: [],                // 敌军数组
   enemiesLeft: 0,             // 尚未出场的敌军数
